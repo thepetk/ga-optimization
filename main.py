@@ -10,6 +10,8 @@ JOBS_DATA = [
 NUM_MACHINES = 3
 POPULATION_LIMIT = 1000
 
+MUTATE_THRESHOLD = 0.5
+
 RAW_TASK = list[tuple[int, int]]
 
 
@@ -150,6 +152,18 @@ class JobScheduler:
             if job_times != len(self.jobs[job_idx]):
                 child[fill_i] = job_idx
                 fill_i += 1
+
+        if not self.validate(child):
+            return -1
+
+        return child
+
+    def mutate(self, child: "Chromosome") -> "Chromosome":
+        if random.random() < MUTATE_THRESHOLD:
+            return child
+
+        idx1, idx2 = random.sample(range(len(child.data)), 2)
+        child.data[idx1], child.data[idx2] = child.data[idx2], child.data[idx1]
 
         if not self.validate(child):
             return -1
