@@ -136,6 +136,26 @@ class JobScheduler:
         print("Fitness {} for chromosome {}".format(end_time_max, chromosome))
         return end_time_max
 
+    def crossover(self, parent1: "Chromosome", parent2: "Chromosome") -> "Chromosome":
+        crossover_start = random.randint(1, len(parent1) - 1)
+        crossover_end = random.randint(crossover_start, len(parent1))
+
+        child = [-1] * len(parent1.data)
+        child[:crossover_start] = parent1.data[:crossover_start]
+        child[crossover_end:] = parent1.data[crossover_end:]
+
+        fill_i = crossover_start
+        for job_idx in parent2.data:
+            job_times = child.count(job_idx)
+            if job_times != len(self.jobs[job_idx]):
+                child[fill_i] = job_idx
+                fill_i += 1
+
+        if not self.validate(child):
+            return -1
+
+        return child
+
 
 if __name__ == "__main__":
     scheduler = JobScheduler(JOBS_DATA, NUM_MACHINES)
