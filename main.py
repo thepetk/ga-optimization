@@ -11,7 +11,8 @@ NUM_MACHINES = 3
 POPULATION_LIMIT = 1000
 SAMPLE_LEN = 100
 MUTATE_THRESHOLD = 0.5
-
+NUM_GENERATIONS = 100
+VERBOSE = 0
 RAW_TASK = list[tuple[int, int]]
 
 
@@ -134,23 +135,23 @@ class JobScheduler:
         for machine in self.machines:
             if machine.end_time > end_time_max:
                 end_time_max = machine.end_time
-
-        print("Fitness {} for chromosome {}".format(end_time_max, chromosome))
+        if VERBOSE:
+            print("Fitness {} for chromosome {}".format(end_time_max, chromosome))
         return end_time_max
 
     def crossover(self, parent1: "Chromosome", parent2: "Chromosome") -> "Chromosome":
-        crossover_start = random.randint(1, len(parent1) - 1)
-        crossover_end = random.randint(crossover_start, len(parent1))
+        crossover_start = random.randint(1, len(parent1.data) - 1)
+        crossover_end = random.randint(crossover_start, len(parent1.data))
 
-        child = [-1] * len(parent1.data)
-        child[:crossover_start] = parent1.data[:crossover_start]
-        child[crossover_end:] = parent1.data[crossover_end:]
+        child = Chromosome(data=[-1] * len(parent1.data))
+        child.data[:crossover_start] = parent1.data[:crossover_start]
+        child.data[crossover_end:] = parent1.data[crossover_end:]
 
         fill_i = crossover_start
         for job_idx in parent2.data:
-            job_times = child.count(job_idx)
-            if job_times != len(self.jobs[job_idx]):
-                child[fill_i] = job_idx
+            job_times = child.data.count(job_idx)
+            if job_times != len(self.jobs[job_idx].tasks):
+                child.data[fill_i] = job_idx
                 fill_i += 1
 
         if not self.validate(child):
@@ -181,6 +182,46 @@ class JobScheduler:
         parent = samples[samples_fitness.index(min(samples_fitness))]
         return parent
 
+    def next_generation(self, generation: "list[Chromosome]") -> "list[Chromosome]":
+        new_generation: "list[Chromosome]" = []
+        generation_fitness = [self.fitness(chromosome) for chromosome in generation]
+        for _ in range(len(generation)):
+            parent1 = self.tournament_select(generation, generation_fitness)
+            parent2 = self.tournament_select(generation, generation_fitness)
+            child = self.crossover(parent1, parent2)
+            child = self.mutate(child)
+            new_generation.append(child)
+        return new_generation
+
+    def calc_best_fitness(
+        self, generation: "list[Chromosome]"
+    ) -> "tuple[Chromosome, int]":
+        generation_fitness = [self.fitness(chromosome) for chromosome in generation]
+        best_fitness = min(generation_fitness)
+        best_chromosome = generation[generation_fitness.index(best_fitness)]
+        return best_chromosome, best_fitness
+
+    def evolve(self) -> "Chromosome":
+        generation = self.create_population()
+
+        best_chromosome, best_fitness = self.calc_best_fitness(generation)
+        print(
+            "Initial population best fitness: {} from chromosome: {}".format(
+                best_fitness, best_chromosome
+            )
+        )
+
+        for i in range(NUM_GENERATIONS):
+            generation = self.next_generation(generation)
+            best_chromosome, best_fitness = self.calc_best_fitness(generation)
+            print(
+                "Generation {} best fitness: {} from chromosome: {}".format(
+                    i, best_fitness, best_chromosome
+                )
+            )
+
+        return best_chromosome
+
 
 if __name__ == "__main__":
     scheduler = JobScheduler(JOBS_DATA, NUM_MACHINES)
@@ -188,4 +229,4 @@ if __name__ == "__main__":
     scheduler.validate(r)
     population = scheduler.create_population()
     scheduler.show_population(population)
-    scheduler.fitness(r)
+    scheduler.evolve()
