@@ -118,12 +118,11 @@ class JobScheduler:
         for job_idx in chromosome.data:
             current_job = self.jobs[job_idx]
             current_task = current_job.get_next_task()
+
             machine_id = current_task.machine_id
             machine = self.machines[machine_id]
-            machine_end_time = machine.end_time
-            job_task_end_time = current_job.task_end_time
 
-            task_start_time = max(machine_end_time, job_task_end_time)
+            task_start_time = max(machine.end_time, current_job.task_end_time)
             task_end_time = task_start_time + current_task.runtime
 
             machine.end_time = task_end_time
