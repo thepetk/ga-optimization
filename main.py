@@ -9,7 +9,7 @@ JOBS_DATA = [
 ]
 NUM_MACHINES = 3
 POPULATION_LIMIT = 1000
-
+SAMPLE_LEN = 100
 MUTATE_THRESHOLD = 0.5
 
 RAW_TASK = list[tuple[int, int]]
@@ -169,6 +169,17 @@ class JobScheduler:
             return -1
 
         return child
+
+    def tournament_select(
+        self,
+        generation: "list[Chromosome]",
+        generation_fitness: "list[int]",
+    ):
+        idxs = random.sample(range(len(generation)), SAMPLE_LEN)
+        samples = [generation[idx] for idx in idxs]
+        samples_fitness = [generation_fitness[idx] for idx in idxs]
+        parent = samples[samples_fitness.index(min(samples_fitness))]
+        return parent
 
 
 if __name__ == "__main__":
