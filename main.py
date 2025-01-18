@@ -1,19 +1,47 @@
 import copy
 from dataclasses import dataclass
+import os
 import random
+from typing import Literal
 
-JOBS_DATA = [
-    [(0, 3), (1, 2), (2, 2)],
-    [(0, 2), (2, 1), (1, 4)],
-    [(1, 4), (2, 3)],
-]
-NUM_MACHINES = 3
-POPULATION_LIMIT = 1000
-SAMPLE_LEN = 100
-MUTATE_THRESHOLD = 0.5
-NUM_GENERATIONS = 100
-VERBOSE = 0
+import numpy as np
+import yaml
+
+DATA_PATH = os.getenv("DATA_YAML", "data.yaml")
+DATASET_NAME = os.getenv("DATASET_NAME", "abz6")
+NUM_GENERATIONS = int(os.getenv("NUM_GENERATIONS", 100))
+# NUM_MACHINES = int(os.getenv("NUM_MACHINES", 3))
+MUTATE_THRESHOLD = float(os.getenv("SAMPLE_LEN", 0.5))
+POPULATION_LIMIT = int(os.getenv("POPOPULATION_LIMITPU", 1000))
 RAW_TASK = list[tuple[int, int]]
+SAMPLE_LEN = int(os.getenv("SAMPLE_LEN", 100))
+SELECTION_MODE: "Literal['tournament', 'stochastic']" = os.getenv(
+    "SELECTION_MODE", "tournament"
+)
+VERBOSE = bool(os.getenv("VERBOSE", 0))
+
+
+class ParentSelectionNotFoundError(Exception):
+    pass
+
+
+class ParentSelection:
+    TOURNAMENT = 1
+    STOCHASTIC = 2
+
+
+def get_selection_mode(mode: "str") -> "int":
+    if SELECTION_MODE == "tournament":
+        return ParentSelection.TOURNAMENT
+    elif SELECTION_MODE == "stochastic":
+        return ParentSelection.STOCHASTIC
+    else:
+        raise ParentSelectionNotFoundError(
+            f"Parent selection mode {mode} is not supported"
+        )
+
+
+PARENT_SELECTION_MODE = get_selection_mode(SELECTION_MODE)
 
 
 @dataclass
@@ -182,12 +210,59 @@ class JobScheduler:
         parent = samples[samples_fitness.index(min(samples_fitness))]
         return parent
 
+    def _stochastic_select(
+        self,
+        dr: "float",
+        ranks: "list[int]",
+    ) -> "np.NDArray":
+        r = random.randint(0, dr)
+        pattern_positions = [(r + dr * i) for i in range(len(ranks))]
+        cum_fitness = np.cumsum(ranks)
+        return cum_fitness.searchsorted(pattern_positions)
+
+    def precompute_stochastic_select(
+        self,
+        generation: "list[Chromosome]",
+        generation_fitness: "list[int]",
+    ) -> "list[tuple[Chromosome]]":
+        stochastic_parents: "list[tuple[Chromosome]]" = []
+
+        ranks = [
+            sorted(generation_fitness, reverse=True).index(x)
+            for x in generation_fitness
+        ]
+
+        dr = int(sum(ranks) / len(ranks))
+        parent1_idx = self._stochastic_select(dr, ranks)
+        random.shuffle(parent1_idx)
+        parent2_idx = self._stochastic_select(dr, ranks)
+        random.shuffle(parent2_idx)
+        for idx in range(len(generation)):
+            parent1 = generation[parent1_idx[idx]]
+            parent2 = generation[parent2_idx[idx]]
+            stochastic_parents.append((parent1, parent2))
+        return stochastic_parents
+
     def next_generation(self, generation: "list[Chromosome]") -> "list[Chromosome]":
         new_generation: "list[Chromosome]" = []
         generation_fitness = [self.fitness(chromosome) for chromosome in generation]
-        for _ in range(len(generation)):
-            parent1 = self.tournament_select(generation, generation_fitness)
-            parent2 = self.tournament_select(generation, generation_fitness)
+        stochastic_parents: "list[tuple[Chromosome]]" = []
+
+        if PARENT_SELECTION_MODE == ParentSelection.STOCHASTIC:
+            stochastic_parents = self.precompute_stochastic_select(
+                generation, generation_fitness
+            )
+
+        for idx in range(len(generation)):
+            if PARENT_SELECTION_MODE == ParentSelection.TOURNAMENT:
+                parent1 = self.tournament_select(generation, generation_fitness)
+                parent2 = self.tournament_select(generation, generation_fitness)
+                while parent1 == parent2:
+                    # ensure parent 1 not equal to parent 2
+                    parent2 = self.tournament_select(generation, generation_fitness)
+            else:
+                parent1, parent2 = stochastic_parents[idx]
+
             child = self.crossover(parent1, parent2)
             child = self.mutate(child)
             new_generation.append(child)
@@ -223,8 +298,32 @@ class JobScheduler:
         return best_chromosome
 
 
+def load_data() -> "tuple[int, int, list[RAW_TASK]]":
+    f = open(DATA_PATH)
+    data_file = yaml.safe_load(f)
+    dataset = None
+    for _d in data_file["instances"]:
+        if _d["name"] == DATASET_NAME:
+            dataset = _d["data"]
+
+    lines = [line for line in dataset.splitlines() if line != []][1:]
+    lines = [list(map(int, line.split())) for line in lines]
+
+    num_jobs, num_machines = lines[0][0], lines[0][1]
+    jobs_data = []
+    for job in range(num_jobs):
+        job_line = lines[job + 1]
+        zipped = list(zip(job_line[0::2], job_line[1::2]))
+        jobs_data.append(zipped)
+
+    return num_machines, num_jobs, jobs_data
+
+
 if __name__ == "__main__":
-    scheduler = JobScheduler(JOBS_DATA, NUM_MACHINES)
+
+    num_machines, num_jobs, jobs_data = load_data()
+
+    scheduler = JobScheduler(jobs_data, num_machines)
     r = scheduler.random_chromosome()
     scheduler.validate(r)
     population = scheduler.create_population()
