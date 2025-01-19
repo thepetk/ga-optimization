@@ -304,7 +304,10 @@ class AntJobScheduler(BaseJobScheduler):
         number of iterations
         """
         best_fitness = None
+        previous_best = None
         best_fitnesses = []
+        streak = 0
+
         for iteration in range(self.num_iterations):
             routes = []
             fitnesses = []
@@ -322,7 +325,18 @@ class AntJobScheduler(BaseJobScheduler):
                     iteration, self.num_iterations, best_fitness
                 )
             )
+            if previous_best is not None and previous_best == best_fitness:
+                streak += 1
+            else:
+                streak = 0
+                previous_best = best_fitness
+
             best_fitnesses.append(best_fitness)
+            if streak == STATIONARY_STATE_THRESHOLD:
+                print(
+                    f"Stationary state reached after {streak} times of equal best fitness {best_fitness}. Breaking"
+                )
+                break
             self._update_pheromone(routes, fitnesses)
 
         return best_fitnesses
