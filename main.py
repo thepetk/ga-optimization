@@ -3,19 +3,21 @@ from dataclasses import dataclass
 import os
 import random
 
+from matplotlib import pyplot as plt
 import numpy as np
 import yaml
 
 # Optimization Parameters
 CROSSOVER_METHOD = os.getenv("CROSSOVER_METHOD", "one_point")
 DATA_PATH = os.getenv("DATA_YAML", "data.yaml")
-DATASET_NAME = os.getenv("DATASET_NAME", "abz5")
+DATASET_NAME = os.getenv("DATASET_NAME", "thpe")
 NUM_GENERATIONS = int(os.getenv("NUM_GENERATIONS", 100))
 MUTATE_THRESHOLD = float(os.getenv("SAMPLE_LEN", 0.5))
 MUTATION_MODE = os.getenv("MUTATION_MODE", "flip")
 POPULATION_LIMIT = int(os.getenv("POPOPULATION_LIMITPU", 1000))
 RAW_TASK = list[tuple[int, int]]
 SAMPLE_LEN = int(os.getenv("SAMPLE_LEN", 100))
+SCHEDULER_TYPE = os.getenv("SCHEDULER_TYPE", "ga")
 SELECTION_MODE = os.getenv("SELECTION_MODE", "tournament")
 STATIONARY_STATE_THRESHOLD = int(os.getenv("STATIONARY_STATE_THRESHOLD", 50))
 VERBOSE = bool(os.getenv("VERBOSE", 0))
@@ -34,6 +36,10 @@ class MutationModeNotFoundError(Exception):
     pass
 
 
+class SchedulerTypeNotFoundError(Exception):
+    pass
+
+
 # Choice Classes
 class ParentSelection:
     TOURNAMENT = 1
@@ -48,6 +54,11 @@ class CrossoverMethod:
 class MutationMode:
     FLIP = 1
     SHIFT = 2
+
+
+class SchedulerType:
+    GA = 1
+    ANTS_COLONY = 2
 
 
 # Choice Methods
@@ -84,10 +95,30 @@ def get_mutation_mode() -> "int":
         )
 
 
+def get_scheduler_type() -> "int":
+    if SCHEDULER_TYPE == "ga":
+        return SchedulerType.GA
+    elif SCHEDULER_TYPE == "ants":
+        return SchedulerType.ANTS_COLONY
+    else:
+        raise SchedulerTypeNotFoundError(
+            f"Scheduler type {SCHEDULER_TYPE} is not supported"
+        )
+
+
 # Refine choices
 SET_PARENT_SELECTION_MODE = get_selection_mode()
 SET_CROSSOVER_METHOD = get_crossover_method()
 SET_MUTATION_MODE = get_mutation_mode()
+SET_SCHEDULER_TYPE = get_scheduler_type()
+
+
+# Second Optimization algorithm parameters
+ANTS_NUMBER = int(os.getenv("ANTS_NUMBER", 10))
+ANTS_PHEROMONE_INFLUENCE = float(os.getenv("ANTS_PHEROMONE_INFLUENCE", 0.5))
+ANTS_HEURISTIC_INFLUENCE = float(os.getenv("ANTS_HEURISTIC_INFLUENCE", 0.8))
+ANTS_EVAPORATION_RATE = float(os.getenv("ANTS_EVAPORATION_RATE", 0.5))
+ANTS_PHEROMONE_DEPOSIT = int(os.getenv("ANTS_PHEROMONE_DEPOSIT", 1))
 
 
 @dataclass
@@ -145,12 +176,7 @@ class Machine:
         self.end_time = 0
 
 
-class JobScheduler:
-    def __init__(self, data: "list[RAW_TASK]", num_machines: "int") -> "None":
-        self.jobs = self._generate_jobs(data)
-        self.machines = self._generate_machines(num_machines)
-        self.base_chromosome = self._generate_base_chromosome()
-
+class BaseJobScheduler:
     def _generate_jobs(self, data: "list[list[tuple[int, int]]]") -> "list[Job]":
         """
         create a list of jobs for a given raw data.
@@ -162,6 +188,146 @@ class JobScheduler:
         create a list of Machine objects for a given number of machines
         """
         return [Machine(machine_id=idx) for idx in range(num_machines)]
+
+
+class AntJobScheduler(BaseJobScheduler):
+    def __init__(self, data: "list[RAW_TASK]", num_machines: "int") -> "None":
+        self.jobs = self._generate_jobs(data)
+        self.machines = self._generate_machines(num_machines)
+        self.n_ants = ANTS_NUMBER
+        self.n_iterations = NUM_GENERATIONS
+        self.pheromone_influence = 0.8  # ANTS_PHEROMONE_INFLUENCE
+        self.heuristic_influence = 2.5  # ANTS_HEURISTIC_INFLUENCE
+        self.evaporation_rate = 0.8  # ANTS_EVAPORATION_RATE
+        self.pheromone_deposit = ANTS_PHEROMONE_DEPOSIT
+        self.pheromone = np.ones(
+            (len(self.jobs), len(self.jobs[0].tasks), len(self.machines))
+        )
+        self.pheromone = np.random.uniform(0.5, 1.5, size=self.pheromone.shape)
+
+    def run(self) -> "None":
+        best_fitness = None
+        best_fitnesses: "list[int]" = []
+
+        for iteration in range(self.n_iterations):
+            routes = []
+            fitnesses = []
+
+            for ant in range(self.n_ants):
+                route, fitness = self._calculate_route()
+                routes.append(route)
+                fitnesses.append(fitness)
+
+                if best_fitness is None or fitness < best_fitness:
+                    best_fitness = fitness
+                    best_ant = ant
+
+                if VERBOSE:
+                    print(
+                        "[{}/{}] Local fitness {} by ant {}".format(
+                            iteration, self.n_iterations, fitness, ant
+                        )
+                    )
+            best_fitnesses.append(best_fitness)
+            self._update_pheromone(routes, fitnesses)
+            print(
+                "[{}/{}] Iteration best fitness {} by ant {}".format(
+                    iteration, self.n_iterations, best_fitness, best_ant
+                )
+            )
+
+        return best_fitnesses
+
+    def _get_probability(
+        self,
+        machine_schedule: "list[int]",
+        jobs_schedule: "list[int]",
+        m_id: "int",
+        j_id: "int",
+        runtime: "int",
+    ) -> "float":
+        pheromone = (
+            self.pheromone[j_id][jobs_schedule[j_id]][m_id] ** self.pheromone_influence
+        )
+        heuristic = (1 / (machine_schedule[m_id] + runtime)) ** self.heuristic_influence
+        return pheromone * heuristic
+
+    def _get_random_job(self, idx_probs: "list[tuple[int, float]]") -> "int":
+        corrected_probs = [
+            (float(p[1]) / (sum([p[1] for p in idx_probs]))) for p in idx_probs
+        ]
+        indices = [p[0] for p in idx_probs]
+        return int(np.random.choice(indices, p=corrected_probs))
+
+    def _calculate_route(self) -> "tuple[int, int, int, int]":
+        route = []
+        jobs_schedule = [0] * len(self.jobs)
+        machine_schedule = [0] * len(self.machines)
+
+        for _ in range(sum(len(job.tasks) for job in self.jobs)):
+            idx_probs = []
+            for j_id, job in enumerate(self.jobs):
+                if jobs_schedule[j_id] < len(job.tasks):
+                    task = job.tasks[jobs_schedule[j_id]]
+                    probability = self._get_probability(
+                        machine_schedule,
+                        jobs_schedule,
+                        task.machine_id,
+                        j_id,
+                        task.runtime,
+                    )
+                    idx_probs.append((j_id, probability))
+
+            if not idx_probs:
+                continue
+
+            selected_job = self._get_random_job(idx_probs)
+            selected_task = self.jobs[selected_job].tasks[jobs_schedule[selected_job]]
+            start_time = max(
+                jobs_schedule[selected_job], machine_schedule[selected_task.machine_id]
+            )
+            route.append(
+                (
+                    selected_job,
+                    selected_task.machine_id,
+                    start_time,
+                    start_time + selected_task.runtime,
+                )
+            )
+            jobs_schedule[selected_job] = start_time + selected_task.runtime
+            machine_schedule[selected_task.machine_id] = (
+                start_time + selected_task.runtime
+            )
+            import pdb
+
+            pdb.set_trace()
+
+        print("route: ", route)
+
+        fitness = max(machine_schedule)
+        return route, fitness
+
+    def _update_pheromone(
+        self, routes: "list[list[tuple[int, int, int, int]]]", fitnesses: "list[int]"
+    ) -> "None":
+        self.pheromone *= 1 - self.evaporation_rate
+
+        for route, fitness in zip(routes, fitnesses):
+            contribution = self.pheromone_deposit / fitness
+            for job_idx, machine, start, end in route:
+                task_idx = [
+                    idx
+                    for idx, task in enumerate(self.jobs[job_idx].tasks)
+                    if task.machine_id == machine and task.runtime == (end - start)
+                ][0]
+                self.pheromone[job_idx][task_idx][machine] += contribution
+
+
+class GAJobScheduler(BaseJobScheduler):
+    def __init__(self, data: "list[RAW_TASK]", num_machines: "int") -> "None":
+        self.jobs = self._generate_jobs(data)
+        self.machines = self._generate_machines(num_machines)
+        self.base_chromosome = self._generate_base_chromosome()
 
     def _generate_base_chromosome(self) -> "Chromosome":
         """
@@ -198,8 +364,9 @@ class JobScheduler:
         ouptuts the current population
         """
         print(f"Population length: {len(population)}")
-        for chromosome in population:
-            print(chromosome)
+        if VERBOSE:
+            for chromosome in population:
+                print(chromosome)
 
     def reset(self) -> "None":
         """
@@ -429,29 +596,35 @@ class JobScheduler:
         best_chromosome = generation[generation_fitness.index(best_fitness)]
         return best_chromosome, best_fitness
 
-    def evolve(self) -> "Chromosome":
+    def evolve(self) -> "tuple[list[int], list[int]]":
         """
         runs the optimization for a number of generations (NUM_GENERATIONS)
         """
         generation = self.create_population()
+        best_fitnesses = []
         streak = 0
         old_fitness = 0
-
         best_chromosome, best_fitness = self.calc_best_fitness(generation)
         print(
             "Initial population best fitness: {} from chromosome: {}".format(
                 best_fitness, best_chromosome
             )
+            if VERBOSE
+            else "Initial population best fitness: {}".format(best_fitness)
         )
-
         for i in range(NUM_GENERATIONS):
             generation = self.next_generation(generation)
             best_chromosome, best_fitness = self.calc_best_fitness(generation)
             print(
-                "Generation {} best fitness: {} from chromosome: {}".format(
-                    i, best_fitness, best_chromosome
+                "[{}/{}] Generation best fitness: {} from chromosome: {}".format(
+                    i, NUM_GENERATIONS, best_fitness, best_chromosome
+                )
+                if VERBOSE
+                else "[{}/{}] Generation best fitness: {}".format(
+                    i, NUM_GENERATIONS, best_fitness
                 )
             )
+            best_fitnesses.append(best_fitness)
             if streak == STATIONARY_STATE_THRESHOLD:
                 print(
                     f"Stationary state reached after {streak} times of equal best fitness {best_fitness}. Breaking"
@@ -464,7 +637,17 @@ class JobScheduler:
                 old_fitness = best_fitness
                 streak = 0
 
-        return best_chromosome
+        return best_fitnesses
+
+    def run(self) -> "None":
+        """
+        mimics the execution flow of the ant scheduler.
+        """
+        r = self.random_chromosome()
+        self.validate(r)
+        population = self.create_population()
+        self.show_population(population)
+        return self.evolve()
 
 
 def load_data() -> "tuple[int, int, list[RAW_TASK]]":
@@ -491,12 +674,32 @@ def load_data() -> "tuple[int, int, list[RAW_TASK]]":
     return num_machines, num_jobs, jobs_data
 
 
+def plot(best_fitnesses: "list[int]") -> "None":
+    plt.figure(figsize=(10, 6))
+    plt.plot(
+        range(len(best_fitnesses)),
+        best_fitnesses,
+        marker="o",
+        linestyle="-",
+        color="b",
+        label="Time",
+    )
+    plt.title("Evolution of fitness", fontsize=16)
+    plt.xlabel("Generations", fontsize=14)
+    plt.ylabel("Best Fitness", fontsize=14)
+    plt.grid(True, which="both", linestyle="--", linewidth=0.5)
+    plt.legend(fontsize=12)
+    plt.tight_layout()
+    plt.show()
+
+
 if __name__ == "__main__":
 
     num_machines, num_jobs, jobs_data = load_data()
-    scheduler = JobScheduler(jobs_data, num_machines)
-    r = scheduler.random_chromosome()
-    scheduler.validate(r)
-    population = scheduler.create_population()
-    scheduler.show_population(population)
-    scheduler.evolve()
+    if SET_SCHEDULER_TYPE == SchedulerType.ANTS_COLONY:
+        scheduler = AntJobScheduler(jobs_data, num_machines)
+    else:  # SET_SCHEDULER_TYPE == SchedulerType.GA
+        scheduler = GAJobScheduler(jobs_data, num_machines)
+
+    best_fitnesses = scheduler.run()
+    plot(best_fitnesses)
