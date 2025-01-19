@@ -116,13 +116,17 @@ SET_SCHEDULER_TYPE = get_scheduler_type()
 # Second Optimization algorithm parameters
 ANTS_NUMBER = int(os.getenv("ANTS_NUMBER", 10))
 ANTS_PHEROMONE_INFLUENCE = float(os.getenv("ANTS_PHEROMONE_INFLUENCE", 0.5))
-ANTS_HEURISTIC_INFLUENCE = float(os.getenv("ANTS_HEURISTIC_INFLUENCE", 0.8))
 ANTS_EVAPORATION_RATE = float(os.getenv("ANTS_EVAPORATION_RATE", 0.5))
 ANTS_PHEROMONE_DEPOSIT = int(os.getenv("ANTS_PHEROMONE_DEPOSIT", 1))
 
 
 @dataclass
 class Chromosome:
+    data: "list[int]"
+
+
+@dataclass
+class Route:
     data: "list[int]"
 
 
@@ -177,6 +181,13 @@ class Machine:
 
 
 class BaseJobScheduler:
+    """
+    a base class for the two different job scheduler solutions
+    """
+
+    jobs: "list[Job]"
+    machines: "list[Machine]"
+
     def _generate_jobs(self, data: "list[list[tuple[int, int]]]") -> "list[Job]":
         """
         create a list of jobs for a given raw data.
@@ -189,138 +200,218 @@ class BaseJobScheduler:
         """
         return [Machine(machine_id=idx) for idx in range(num_machines)]
 
+    def _generate_base_data(self) -> "list[RAW_TASK]":
+        """
+        generate an initial object
+        """
+        _initial_chromosome = [
+            [idx] * len(job.tasks) for idx, job in enumerate(self.jobs)
+        ]
+        return [l for ll in _initial_chromosome for l in ll]
+
+    def _randomize(self, item: "Chromosome | Route") -> "Chromosome | Route":
+        """
+        randomize the initial chromosome or route synthesis
+        """
+        c = copy.deepcopy(item)
+        random.shuffle(c.data)
+        return c
+
+    def _validate(self, item: "Chromosome | Route") -> "bool":
+        """
+        validates a given item
+        """
+        for idx in range(len(self.jobs)):
+            job_times = item.data.count(idx)
+            # the occurencies of a job inside the item
+            # should be equal to the number of job's tasks
+            if job_times != len(self.jobs[idx].tasks):
+                return False
+        return True
+
+    def _reset(self) -> "None":
+        """
+        resets all jobs and machines of scheduler
+        """
+        for job in self.jobs:
+            job.reset_tasks()
+
+        for machine in self.machines:
+            machine.reset()
+
+    def _fitness(self, item: "Chromosome | Route") -> "int":
+        """
+        get the fitness of a given item
+        """
+        self._reset()
+
+        if not self._validate(item):
+            return -1
+
+        for job_idx in item.data:
+            current_job = self.jobs[job_idx]
+            current_task = current_job.get_next_task()
+
+            machine_id = current_task.machine_id
+            machine = self.machines[machine_id]
+
+            task_start_time = max(machine.end_time, current_job.task_end_time)
+            task_end_time = task_start_time + current_task.runtime
+
+            machine.end_time = task_end_time
+            current_job.task_end_time = task_end_time
+
+        end_time_max = -1
+        for machine in self.machines:
+            if machine.end_time > end_time_max:
+                end_time_max = machine.end_time
+
+        return end_time_max
+
 
 class AntJobScheduler(BaseJobScheduler):
     def __init__(self, data: "list[RAW_TASK]", num_machines: "int") -> "None":
         self.jobs = self._generate_jobs(data)
         self.machines = self._generate_machines(num_machines)
-        self.n_ants = ANTS_NUMBER
-        self.n_iterations = NUM_GENERATIONS
-        self.pheromone_influence = 0.8  # ANTS_PHEROMONE_INFLUENCE
-        self.heuristic_influence = 2.5  # ANTS_HEURISTIC_INFLUENCE
-        self.evaporation_rate = 0.8  # ANTS_EVAPORATION_RATE
+        self.base_route = self._generate_base_route()
+        self.num_ants = ANTS_NUMBER
+        self.num_iterations = NUM_GENERATIONS
+        self.pheromone_influence = ANTS_PHEROMONE_INFLUENCE
+        self.evaporation_rate = ANTS_EVAPORATION_RATE
         self.pheromone_deposit = ANTS_PHEROMONE_DEPOSIT
-        self.pheromone = np.ones(
-            (len(self.jobs), len(self.jobs[0].tasks), len(self.machines))
-        )
-        self.pheromone = np.random.uniform(0.5, 1.5, size=self.pheromone.shape)
+        # the first column corresponds to the probability of choosing each
+        # job as the initial schedule of jobs
+        self.pheromones = np.ones((len(self.jobs), len(self.jobs) + 1))
+
+    def _generate_base_route(self) -> "Route":
+        """
+        generate an initial Route object
+        """
+        return Route(data=self._generate_base_data())
+
+    def random_route(self) -> "Route":
+        """
+        randomize the initial chromosome synthesis
+        """
+        return self._randomize(self.base_route)
 
     def run(self) -> "None":
+        """
+        iterates for a given number of iterations.
+        In each iteration each ant tries to calculate
+        it route based on the table of pheromones.
+        Returns the list of best fitnesses over the
+        number of iterations
+        """
         best_fitness = None
-        best_fitnesses: "list[int]" = []
-
-        for iteration in range(self.n_iterations):
+        best_fitnesses = []
+        for iteration in range(self.num_iterations):
             routes = []
             fitnesses = []
-
-            for ant in range(self.n_ants):
-                route, fitness = self._calculate_route()
+            for _ in range(self.num_ants):
+                route = self._calculate_route()
+                fitness = self.fitness(route)
                 routes.append(route)
-                fitnesses.append(fitness)
 
-                if best_fitness is None or fitness < best_fitness:
+                if best_fitness is None or best_fitness >= fitness:
                     best_fitness = fitness
-                    best_ant = ant
 
-                if VERBOSE:
-                    print(
-                        "[{}/{}] Local fitness {} by ant {}".format(
-                            iteration, self.n_iterations, fitness, ant
-                        )
-                    )
-            best_fitnesses.append(best_fitness)
-            self._update_pheromone(routes, fitnesses)
+                fitnesses.append(fitness)
             print(
-                "[{}/{}] Iteration best fitness {} by ant {}".format(
-                    iteration, self.n_iterations, best_fitness, best_ant
+                "[{}/{}] Iteration best fitness {}".format(
+                    iteration, self.num_iterations, best_fitness
                 )
             )
+            best_fitnesses.append(best_fitness)
+            self._update_pheromone(routes, fitnesses)
 
         return best_fitnesses
 
-    def _get_probability(
-        self,
-        machine_schedule: "list[int]",
-        jobs_schedule: "list[int]",
-        m_id: "int",
-        j_id: "int",
-        runtime: "int",
-    ) -> "float":
-        pheromone = (
-            self.pheromone[j_id][jobs_schedule[j_id]][m_id] ** self.pheromone_influence
-        )
-        heuristic = (1 / (machine_schedule[m_id] + runtime)) ** self.heuristic_influence
-        return pheromone * heuristic
+    def validate(self, route: "Route") -> "bool":
+        """
+        validates a given route
+        """
+        return self._validate(route)
 
-    def _get_random_job(self, idx_probs: "list[tuple[int, float]]") -> "int":
+    def fitness(self, route: "Route") -> "int":
+        """
+        get the fitness of a given route
+        """
+        end_time_max = self._fitness(route)
+        if VERBOSE:
+            print("Fitness {} for route {}".format(end_time_max, route))
+        return end_time_max
+
+    def _get_job_probs(self, current_job_id: "int", next_job_id: "int") -> "float":
+        """
+        get the probabilities for the current job and a potential next one
+        """
+        pheromone = (
+            self.pheromones[current_job_id][next_job_id] ** self.pheromone_influence
+        )
+        return pheromone
+
+    def _get_first_job(self) -> "int":
+        """
+        get the first random job based on the initial column of
+        pheromones
+        """
+        return int(
+            np.random.choice(
+                range(len(self.jobs)),
+                p=self.pheromones[:, 0] / sum(self.pheromones[:, 0]),
+            )
+        )
+
+    def _get_random_job(self, job_probs: "list[tuple[int, float]]") -> "int":
+        """
+        based on the table of probabilities get the next choice for a job
+        """
         corrected_probs = [
-            (float(p[1]) / (sum([p[1] for p in idx_probs]))) for p in idx_probs
+            (float(p[1]) / (sum([p[1] for p in job_probs]))) for p in job_probs
         ]
-        indices = [p[0] for p in idx_probs]
+        indices = [p[0] for p in job_probs]
         return int(np.random.choice(indices, p=corrected_probs))
 
-    def _calculate_route(self) -> "tuple[int, int, int, int]":
-        route = []
-        jobs_schedule = [0] * len(self.jobs)
-        machine_schedule = [0] * len(self.machines)
+    def _calculate_route(self) -> "Route":
+        """
+        generates a route based on the table of pheromones
+        defined by the scheduler
+        """
+        route_data = []
+        total_tasks = sum(len(job.tasks) for job in self.jobs)
 
-        for _ in range(sum(len(job.tasks) for job in self.jobs)):
-            idx_probs = []
+        current_job = self._get_first_job()
+        route_data.append(current_job)
+        while len(route_data) < total_tasks:
+            job_probs = []
             for j_id, job in enumerate(self.jobs):
-                if jobs_schedule[j_id] < len(job.tasks):
-                    task = job.tasks[jobs_schedule[j_id]]
-                    probability = self._get_probability(
-                        machine_schedule,
-                        jobs_schedule,
-                        task.machine_id,
-                        j_id,
-                        task.runtime,
-                    )
-                    idx_probs.append((j_id, probability))
+                if route_data.count(j_id) < len(job.tasks):
+                    probability = self._get_job_probs(current_job, j_id)
+                    job_probs.append((j_id, probability))
 
-            if not idx_probs:
-                continue
-
-            selected_job = self._get_random_job(idx_probs)
-            selected_task = self.jobs[selected_job].tasks[jobs_schedule[selected_job]]
-            start_time = max(
-                jobs_schedule[selected_job], machine_schedule[selected_task.machine_id]
-            )
-            route.append(
-                (
-                    selected_job,
-                    selected_task.machine_id,
-                    start_time,
-                    start_time + selected_task.runtime,
-                )
-            )
-            jobs_schedule[selected_job] = start_time + selected_task.runtime
-            machine_schedule[selected_task.machine_id] = (
-                start_time + selected_task.runtime
-            )
-            import pdb
-
-            pdb.set_trace()
-
-        print("route: ", route)
-
-        fitness = max(machine_schedule)
-        return route, fitness
+            if job_probs:
+                current_job = self._get_random_job(job_probs)
+                route_data.append(current_job)
+        route = Route(data=route_data)
+        self.validate(route)
+        return route
 
     def _update_pheromone(
-        self, routes: "list[list[tuple[int, int, int, int]]]", fitnesses: "list[int]"
+        self, routes: "list[Route]", fitnesses: "list[int]"
     ) -> "None":
-        self.pheromone *= 1 - self.evaporation_rate
+        """
+        update the table of pheromones for a given list of routes
+        and their fitnesses
+        """
+        self.pheromones *= 1 - self.evaporation_rate
 
         for route, fitness in zip(routes, fitnesses):
             contribution = self.pheromone_deposit / fitness
-            for job_idx, machine, start, end in route:
-                task_idx = [
-                    idx
-                    for idx, task in enumerate(self.jobs[job_idx].tasks)
-                    if task.machine_id == machine and task.runtime == (end - start)
-                ][0]
-                self.pheromone[job_idx][task_idx][machine] += contribution
+            job_idx_prev = 0
+            for job_idx in route.data:
+                self.pheromones[job_idx][job_idx_prev] += contribution
+                job_idx_prev = job_idx
 
 
 class GAJobScheduler(BaseJobScheduler):
@@ -333,18 +424,13 @@ class GAJobScheduler(BaseJobScheduler):
         """
         generate an initial Chromosome object
         """
-        _initial_chromosome = [
-            [idx] * len(job.tasks) for idx, job in enumerate(self.jobs)
-        ]
-        return Chromosome(data=[l for ll in _initial_chromosome for l in ll])
+        return Chromosome(data=self._generate_base_data())
 
     def random_chromosome(self) -> "Chromosome":
         """
         randomize the initial chromosome synthesis
         """
-        c = copy.deepcopy(self.base_chromosome)
-        random.shuffle(c.data)
-        return c
+        return self._randomize(self.base_chromosome)
 
     def create_population(self) -> "list[Chromosome]":
         """
@@ -372,51 +458,19 @@ class GAJobScheduler(BaseJobScheduler):
         """
         resets all jobs and machines of scheduler
         """
-        for job in self.jobs:
-            job.reset_tasks()
-
-        for machine in self.machines:
-            machine.reset()
+        self._reset()
 
     def validate(self, chromosome: "Chromosome") -> "bool":
         """
         validates a given chromosome
         """
-        for idx in range(len(self.jobs)):
-            job_times = chromosome.data.count(idx)
-            # the occurencies of a job inside the chromosome
-            # should be equal to the number of job's tasks
-            if job_times != len(self.jobs[idx].tasks):
-                print(f"Invalid generated chromosome: {chromosome.data}")
-                return False
-        return True
+        return self._validate(chromosome)
 
     def fitness(self, chromosome: "Chromosome") -> "int":
         """
         get the fitness of a given chromosome
         """
-        self.reset()
-
-        if not self.validate(chromosome):
-            return -1
-
-        for job_idx in chromosome.data:
-            current_job = self.jobs[job_idx]
-            current_task = current_job.get_next_task()
-
-            machine_id = current_task.machine_id
-            machine = self.machines[machine_id]
-
-            task_start_time = max(machine.end_time, current_job.task_end_time)
-            task_end_time = task_start_time + current_task.runtime
-
-            machine.end_time = task_end_time
-            current_job.task_end_time = task_end_time
-
-        end_time_max = -1
-        for machine in self.machines:
-            if machine.end_time > end_time_max:
-                end_time_max = machine.end_time
+        end_time_max = self._fitness(chromosome)
         if VERBOSE:
             print("Fitness {} for chromosome {}".format(end_time_max, chromosome))
         return end_time_max
